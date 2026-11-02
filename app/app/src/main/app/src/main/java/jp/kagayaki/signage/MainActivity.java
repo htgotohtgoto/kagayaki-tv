@@ -1,255 +1,246 @@
 package jp.kagayaki.signage;
 
-import android.Manifest;
 import android.app.Activity;
-import android.app.AlertDialog;
-import android.content.Context;
-import android.content.SharedPreferences;
-import android.content.pm.PackageManager;
 import android.graphics.Color;
-import android.net.Uri;
-import android.os.Build;
+import android.graphics.Typeface;
 import android.os.Bundle;
-import android.text.InputType;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.TypedValue;
+import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.Window;
 import android.view.WindowManager;
-import android.webkit.JavascriptInterface;
-import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
-import android.widget.Toast;
-
-import java.util.ArrayList;
-import java.util.List;
 
 public class MainActivity extends Activity {
 
-    private static final String PREFS_NAME = "KagayakiSignagePrefs";
-    private static final String KEY_START_URL = "start_url";
-    private static final int PERMISSION_REQ_CODE = 1001;
+    private static final String START_URL = "https://kagayaki.securesite.jp/dhonkan.AKfycbw851aTGx3Ky88N2hZb_xnuWwZo4t1V4oWC-f0SJ7NaktjBktLNGYfm35ej6bJiBYhBlg.html";
+    private static final long RETRY_INTERVAL_MS = 5000;
+    private static final int SHOW_GUIDE_RETRY_COUNT = 6;
 
     private WebView webView;
-    private SharedPreferences prefs;
-    private String registeredHost = "";
+    private LinearLayout waitingOverlay;
+    private TextView statusText;
+    private TextView subGuideBox;
 
-    private int secretKeyCount = 0;
-    private long lastSecretKeyTime = 0;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private int retryCount = 0;
+    private boolean hasErrorInCurrentLoad = false;
+    private boolean isRetryScheduled = false;
+
+    private final Runnable retryRunnable = new Runnable() {
+        @Override
+        public void run() {
+            isRetryScheduled = false;
+            if (webView != null) {
+                hasErrorInCurrentLoad = false;
+                statusText.setText("ネットワーク接続を待機しています... (自動再接続: " + retryCount + "回目)\n（Wi-Fiが繋がると自動的に開始します。そのままお待ちください）");
+                webView.loadUrl(START_URL);
+            }
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        requestWindowFeature(Window.FEATURE_NO_TITLE);
+        getWindow().setFlags(
+                WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                WindowManager.LayoutParams.FLAG_FULLSCREEN
+        );
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        hideSystemUI();
 
-        prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        FrameLayout rootLayout = new FrameLayout(this);
+        rootLayout.setBackgroundColor(Color.parseColor("#0d1b2a"));
 
         webView = new WebView(this);
-        webView.setBackgroundColor(Color.parseColor("#f4f1ea"));
-        setContentView(webView);
+        webView.setBackgroundColor(Color.parseColor("#0d1b2a"));
+        setupWebViewSettings();
 
-        setupSecureWebView();
-        requestOsRuntimePermissions();
+        waitingOverlay = createWaitingOverlay();
+
+        rootLayout.addView(webView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        rootLayout.addView(waitingOverlay, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+
+        setContentView(rootLayout);
+        webView.loadUrl(START_URL);
     }
 
-    private void requestOsRuntimePermissions() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            String[] perms = {
-                Manifest.permission.CAMERA,
-                Manifest.permission.RECORD_AUDIO
-            };
-            List<String> needed = new ArrayList<>();
-            for (String p : perms) {
-                if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) {
-                    needed.add(p);
-                }
-            }
-            if (!needed.isEmpty()) {
-                requestPermissions(needed.toArray(new String[0]), PERMISSION_REQ_CODE);
-                return;
-            }
-        }
-        bootOrShowUrlSetup();
-    }
+    private void setupWebViewSettings() {
+        WebSettings settings = webView.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setDatabaseEnabled(true);
+        settings.setMediaPlaybackRequiresUserGesture(false);
+        settings.setLoadWithOverviewMode(true);
+        settings.setUseWideViewPort(true);
+        settings.setCacheMode(WebSettings.LOAD_DEFAULT);
 
-    @Override
-    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        bootOrShowUrlSetup();
-    }
-
-    private void bootOrShowUrlSetup() {
-        String savedUrl = prefs.getString(KEY_START_URL, "");
-        if (savedUrl == null || savedUrl.trim().isEmpty()) {
-            showFacilityUrlDialog("");
-        } else {
-            loadFacilityHubUrl(savedUrl.trim());
-        }
-    }
-
-    private void loadFacilityHubUrl(String url) {
-        try {
-            Uri uri = Uri.parse(url);
-            if (!"https".equalsIgnoreCase(uri.getScheme())) {
-                Toast.makeText(this, "セキュリティ保護のため https:// で始まるURLのみ設定可能です", Toast.LENGTH_LONG).show();
-                showFacilityUrlDialog(url);
-                return;
-            }
-            registeredHost = uri.getHost() != null ? uri.getHost().toLowerCase() : "";
-            webView.loadUrl(url);
-        } catch (Exception e) {
-            showFacilityUrlDialog(url);
-        }
-    }
-
-    private boolean isTrustedOrigin(Uri uri) {
-        if (uri == null || !"https".equalsIgnoreCase(uri.getScheme())) return false;
-        String host = uri.getHost() != null ? uri.getHost().toLowerCase() : "";
-        if (host.isEmpty()) return false;
-
-        if (!registeredHost.isEmpty() && (host.equals(registeredHost) || host.endsWith("." + registeredHost))) {
-            return true;
-        }
-        return host.equals("script.google.com")
-            || host.endsWith(".script.google.com")
-            || host.endsWith(".googleusercontent.com")
-            || host.equals("docs.google.com")
-            || host.equals("drive.google.com");
-    }
-
-    private void setupSecureWebView() {
-        WebSettings s = webView.getSettings();
-        s.setJavaScriptEnabled(true);
-        s.setDomStorageEnabled(true);
-        s.setDatabaseEnabled(true);
-        s.setMediaPlaybackRequiresUserGesture(false);
-
-        s.setAllowFileAccess(false);
-        s.setAllowContentAccess(false);
-        s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
-        s.setCacheMode(WebSettings.LOAD_DEFAULT);
-
-        webView.addJavascriptInterface(new Object() {
-            @JavascriptInterface
-            public boolean isNativeKiosk() {
-                return true;
-            }
-        }, "KagayakiNativeApp");
-
+        webView.setWebChromeClient(new WebChromeClient());
         webView.setWebViewClient(new WebViewClient() {
-            @Override
-            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                Uri uri = request.getUrl();
-                if (uri != null && "https".equalsIgnoreCase(uri.getScheme())) {
-                    return false;
-                }
-                return true;
-            }
-        });
 
-        webView.setWebChromeClient(new WebChromeClient() {
             @Override
-            public void onPermissionRequest(final PermissionRequest request) {
-                runOnUiThread(() -> {
-                    Uri origin = request.getOrigin();
-                    if (isTrustedOrigin(origin)) {
-                        request.grant(request.getResources());
-                    } else {
-                        request.deny();
-                    }
-                });
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                if (!hasErrorInCurrentLoad && !"about:blank".equals(url)) {
+                    handler.removeCallbacks(retryRunnable);
+                    isRetryScheduled = false;
+                    retryCount = 0;
+                    waitingOverlay.setVisibility(View.GONE);
+                    webView.setVisibility(View.VISIBLE);
+                    webView.requestFocus();
+                }
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                super.onReceivedError(view, request, error);
+                if (request != null && request.isForMainFrame()) {
+                    handleMainFrameError();
+                }
+            }
+
+            @SuppressWarnings("deprecation")
+            @Override
+            public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+                super.onReceivedError(view, errorCode, description, failingUrl);
+                if (failingUrl != null && failingUrl.equals(START_URL)) {
+                    handleMainFrameError();
+                }
             }
         });
     }
 
-    private void showFacilityUrlDialog(String currentUrl) {
+    private void handleMainFrameError() {
+        hasErrorInCurrentLoad = true;
+        retryCount++;
+
+        webView.setVisibility(View.INVISIBLE);
+        waitingOverlay.setVisibility(View.VISIBLE);
+
+        statusText.setText("ネットワーク接続を待機しています...\n（Wi-Fiが繋がると自動的に開始します。そのままお待ちください）");
+
+        if (retryCount >= SHOW_GUIDE_RETRY_COUNT) {
+            subGuideBox.setVisibility(View.VISIBLE);
+        }
+
+        if (!isRetryScheduled) {
+            isRetryScheduled = true;
+            handler.postDelayed(retryRunnable, RETRY_INTERVAL_MS);
+        }
+    }
+
+    private LinearLayout createWaitingOverlay() {
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
-        int pad = 40;
+        layout.setGravity(Gravity.CENTER);
+        layout.setBackgroundColor(Color.parseColor("#0d1b2a"));
+        int pad = dpToPx(36);
         layout.setPadding(pad, pad, pad, pad);
 
-        TextView note = new TextView(this);
-        note.setText("この施設のハブURL（https://.../index.html）を入力してください。\n（※運用中に再設定する場合はリモコンの「0」または「戻る」を5連打）");
-        note.setTextSize(16f);
-        layout.addView(note);
+        ImageView logoView = new ImageView(this);
+        int logoResId = getResources().getIdentifier("logo", "drawable", getPackageName());
+        if (logoResId == 0) {
+            logoResId = getResources().getIdentifier("ic_launcher", "mipmap", getPackageName());
+        }
+        if (logoResId != 0) {
+            logoView.setImageResource(logoResId);
+            LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dpToPx(240), dpToPx(130));
+            logoParams.bottomMargin = dpToPx(24);
+            logoView.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            layout.addView(logoView, logoParams);
+        }
 
-        final EditText input = new EditText(this);
-        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        input.setSingleLine(true);
-        input.setHint("https://example.com/index.html");
-        input.setText(currentUrl);
-        layout.addView(input);
+        TextView titleView = new TextView(this);
+        titleView.setText("かがやきサイネージ");
+        titleView.setTextColor(Color.parseColor("#00e676"));
+        titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30);
+        titleView.setTypeface(null, Typeface.BOLD);
+        titleView.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        titleParams.bottomMargin = dpToPx(18);
+        layout.addView(titleView, titleParams);
 
-        new AlertDialog.Builder(this)
-            .setTitle("Kagayaki Signage - 施設URL設定")
-            .setView(layout)
-            .setCancelable(false)
-            .setPositiveButton("保存して起動", (dialog, which) -> {
-                String entered = input.getText().toString().trim();
-                if (!entered.startsWith("https://")) {
-                    Toast.makeText(MainActivity.this, "https:// から始まるURLを入力してください", Toast.LENGTH_LONG).show();
-                    showFacilityUrlDialog(entered);
-                    return;
-                }
-                prefs.edit().putString(KEY_START_URL, entered).apply();
-                hideSystemUI();
-                loadFacilityHubUrl(entered);
-            })
-            .setNeutralButton("再読み込み", (dialog, which) -> {
-                hideSystemUI();
-                webView.reload();
-            })
-            .show();
+        statusText = new TextView(this);
+        statusText.setText("ネットワーク接続を待機しています...\n（Wi-Fiが繋がると自動的に開始します。そのままお待ちください）");
+        statusText.setTextColor(Color.WHITE);
+        statusText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+        statusText.setTypeface(null, Typeface.BOLD);
+        statusText.setGravity(Gravity.CENTER);
+        statusText.setLineSpacing(dpToPx(6), 1.0f);
+        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        statusParams.bottomMargin = dpToPx(28);
+        layout.addView(statusText, statusParams);
+
+        subGuideBox = new TextView(this);
+        subGuideBox.setText(
+                "【1分以上この画面が変わらない場合の対処法】\n" +
+                "① リモコンの「ホーム（家マーク）」ボタンを押し、数秒待ってからもう一度「かがやきサイネージ」を開き直してください。\n" +
+                "② それでも繋がらない場合は、施設のWi-Fiルーター（親機）とテレビ裏の機器（Google TV）の電源コンセントを抜き、5分ほど待ってから差し直してください。"
+        );
+        subGuideBox.setTextColor(Color.parseColor("#ffeb3b"));
+        subGuideBox.setBackgroundColor(Color.parseColor("#1b263b"));
+        subGuideBox.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        subGuideBox.setGravity(Gravity.LEFT);
+        subGuideBox.setLineSpacing(dpToPx(5), 1.0f);
+        int boxPad = dpToPx(20);
+        subGuideBox.setPadding(boxPad, boxPad, boxPad, boxPad);
+        subGuideBox.setVisibility(View.GONE);
+
+        LinearLayout.LayoutParams guideParams = new LinearLayout.LayoutParams(
+                dpToPx(780),
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        layout.addView(subGuideBox, guideParams);
+
+        return layout;
     }
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
-        if (event.getAction() == KeyEvent.ACTION_DOWN) {
-            int code = event.getKeyCode();
-            if (code == KeyEvent.KEYCODE_0 || code == KeyEvent.KEYCODE_MENU || code == KeyEvent.KEYCODE_BACK) {
-                long now = System.currentTimeMillis();
-                if (now - lastSecretKeyTime > 800) {
-                    secretKeyCount = 1;
-                } else {
-                    secretKeyCount++;
-                }
-                lastSecretKeyTime = now;
-
-                if (secretKeyCount >= 5) {
-                    secretKeyCount = 0;
-                    String saved = prefs.getString(KEY_START_URL, "");
-                    showFacilityUrlDialog(saved);
-                    return true;
-                }
-                if (code == KeyEvent.KEYCODE_BACK) {
-                    return true;
-                }
+        if (waitingOverlay != null && waitingOverlay.getVisibility() == View.VISIBLE) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN &&
+                (event.getKeyCode() == KeyEvent.KEYCODE_DPAD_CENTER || event.getKeyCode() == KeyEvent.KEYCODE_ENTER)) {
+                handler.removeCallbacks(retryRunnable);
+                retryRunnable.run();
+                return true;
             }
         }
         return super.dispatchKeyEvent(event);
     }
 
-    private void hideSystemUI() {
-        getWindow().getDecorView().setSystemUiVisibility(
-            View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-            | View.SYSTEM_UI_FLAG_FULLSCREEN
-            | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-        );
+    @Override
+    protected void onDestroy() {
+        handler.removeCallbacks(retryRunnable);
+        super.onDestroy();
     }
 
-    @Override
-    protected void onResume() {
-        super.onResume();
-        hideSystemUI();
+    private int dpToPx(int dp) {
+        return Math.round(dp * getResources().getDisplayMetrics().density);
     }
 }
