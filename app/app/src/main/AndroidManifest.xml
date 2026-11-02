@@ -2,32 +2,28 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.CAMERA" />
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <uses-feature android:name="android.software.leanback" android:required="false" />
-    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
-    <uses-feature android:name="android.hardware.camera" android:required="false" />
-    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
-    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
 
     <application
         android:allowBackup="true"
-        android:label="Kagayaki Signage"
-        android:icon="@android:drawable/ic_menu_slideshow"
-        android:banner="@android:drawable/ic_menu_slideshow"
-        android:usesCleartextTraffic="false"
-        android:hardwareAccelerated="true"
+        android:icon="@drawable/logo"
+        android:banner="@drawable/tv_banner"
+        android:label="かがやきサイネージ"
+        android:usesCleartextTraffic="true"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
 
         <activity
             android:name=".MainActivity"
-            android:exported="true"
             android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation"
-            android:screenOrientation="landscape"
-            android:keepScreenOn="true">
+            android:exported="true"
+            android:screenOrientation="landscape">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -35,4 +31,5 @@
             </intent-filter>
         </activity>
     </application>
+
 </manifest>
