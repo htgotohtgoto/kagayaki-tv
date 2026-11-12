@@ -4,6 +4,13 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- Android 11以降でOSの音声読み上げエンジン(TTS)を利用するための必須宣言 -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
+
     <uses-feature
         android:name="android.software.leanback"
         android:required="false" />
