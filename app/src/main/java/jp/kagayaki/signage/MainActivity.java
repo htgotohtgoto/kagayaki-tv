@@ -3,9 +3,13 @@ package jp.kagayaki.signage;
 import android.app.Activity;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.speech.tts.TextToSpeech;
+import android.speech.tts.UtteranceProgressListener;
+import android.speech.tts.Voice;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -13,6 +17,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
@@ -24,7 +29,14 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
-public class MainActivity extends Activity {
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+
+public class MainActivity extends Activity implements TextToSpeech.OnInitListener {
 
     private static final String START_URL = "https://kagayaki.securesite.jp/dhonkan.AKfycbw851aTGx3Ky88N2hZb_xnuWwZo4t1V4oWC-f0SJ7NaktjBktLNGYfm35ej6bJiBYhBlg.html";
     private static final long RETRY_INTERVAL_MS = 5000;
@@ -39,6 +51,11 @@ public class MainActivity extends Activity {
     private int retryCount = 0;
     private boolean hasErrorInCurrentLoad = false;
     private boolean isRetryScheduled = false;
+
+    // Android標準 TTS（音声合成）エンジン管理
+    private TextToSpeech tts;
+    private boolean isTtsReady = false;
+    private final List<Voice> jaVoices = new ArrayList<>();
 
     private final Runnable retryRunnable = new Runnable() {
         @Override
@@ -62,6 +79,9 @@ public class MainActivity extends Activity {
                 WindowManager.LayoutParams.FLAG_FULLSCREEN
         );
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+        // Android標準の音声合成(TTS)エンジンを初期化
+        tts = new TextToSpeech(this, this);
 
         FrameLayout rootLayout = new FrameLayout(this);
         rootLayout.setBackgroundColor(Color.parseColor("#0d1b2a"));
@@ -94,6 +114,9 @@ public class MainActivity extends Activity {
         settings.setLoadWithOverviewMode(true);
         settings.setUseWideViewPort(true);
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+
+        // 親ハブHTMLから呼び出せる AndroidTTS ブリッジを登録
+        webView.addJavascriptInterface(new AndroidTtsBridge(), "AndroidTTS");
 
         webView.setWebChromeClient(new WebChromeClient());
         webView.setWebViewClient(new WebViewClient() {
@@ -128,6 +151,153 @@ public class MainActivity extends Activity {
                 }
             }
         });
+    }
+
+    @Override
+    public void onInit(int status) {
+        if (status == TextToSpeech.SUCCESS && tts != null) {
+            int res = tts.setLanguage(Locale.JAPANESE);
+            isTtsReady = (res != TextToSpeech.LANG_MISSING_DATA && res != TextToSpeech.LANG_NOT_SUPPORTED);
+
+            if (isTtsReady && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                try {
+                    jaVoices.clear();
+                    Set<Voice> voices = tts.getVoices();
+                    if (voices != null) {
+                        for (Voice v : voices) {
+                            if (v != null && v.getLocale() != null
+                                    && "ja".equals(v.getLocale().getLanguage())
+                                    && !v.isNetworkConnectionRequired()) {
+                                jaVoices.add(v);
+                            }
+                        }
+                        Collections.sort(jaVoices, new Comparator<Voice>() {
+                            @Override
+                            public int compare(Voice a, Voice b) {
+                                return a.getName().compareTo(b.getName());
+                            }
+                        });
+                    }
+                } catch (Exception ignored) {
+                    jaVoices.clear();
+                }
+            }
+
+            tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+                @Override
+                public void onStart(String utteranceId) {
+                    if (utteranceId != null) {
+                        notifyHubTtsEvent(utteranceId, "started", null);
+                    }
+                }
+
+                @Override
+                public void onDone(String utteranceId) {
+                    if (utteranceId != null) {
+                        notifyHubTtsEvent(utteranceId, "ended", null);
+                    }
+                }
+
+                @Deprecated
+                @Override
+                public void onError(String utteranceId) {
+                    if (utteranceId != null) {
+                        notifyHubTtsEvent(utteranceId, "error", "ANDROID_TTS_ERROR");
+                    }
+                }
+
+                @Override
+                public void onError(String utteranceId, int errorCode) {
+                    if (utteranceId != null) {
+                        notifyHubTtsEvent(utteranceId, "error", "ANDROID_TTS_ERROR_" + errorCode);
+                    }
+                }
+            });
+        }
+    }
+
+    private void notifyHubTtsEvent(final String requestId, final String eventType, final String code) {
+        final String safeId = requestId.replace("'", "\\'");
+        final String safeCode = (code != null) ? ("'" + code.replace("'", "\\'") + "'") : "null";
+        final String js = "if(window.HubAudioEngine && window.HubAudioEngine.onAndroidTtsEvent){"
+                + "window.HubAudioEngine.onAndroidTtsEvent('" + safeId + "','" + eventType + "'," + safeCode + ");}";
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (webView != null) {
+                    try {
+                        webView.evaluateJavascript(js, null);
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+        });
+    }
+
+    public class AndroidTtsBridge {
+
+        @JavascriptInterface
+        public boolean isAvailable() {
+            return isTtsReady;
+        }
+
+        @JavascriptInterface
+        public void speak(final String requestId, final String text, final String roleKey, final float rate, final float pitch) {
+            handler.post(new Runnable() {
+                @Override
+                public void run() {
+                    if (!isTtsReady || tts == null) {
+                        notifyHubTtsEvent(requestId, "error", "TTS_NOT_READY");
+                        return;
+                    }
+                    try {
+                        tts.stop();
+
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && !jaVoices.isEmpty()) {
+                            int idx = 0;
+                            if ("OURA".equals(roleKey)) {
+                                idx = 1 % jaVoices.size();
+                            } else if ("NAKA".equals(roleKey)) {
+                                idx = 2 % jaVoices.size();
+                            } else if ("YOCCHAN".equals(roleKey)) {
+                                idx = 3 % jaVoices.size();
+                            }
+                            tts.setVoice(jaVoices.get(idx));
+                        }
+
+                        float clampedRate = Math.max(0.4f, Math.min(2.5f, rate));
+                        float clampedPitch = Math.max(0.3f, Math.min(2.0f, pitch));
+                        tts.setSpeechRate(clampedRate);
+                        tts.setPitch(clampedPitch);
+
+                        Bundle params = new Bundle();
+                        params.putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f);
+
+                        int result = tts.speak(text, TextToSpeech.QUEUE_FLUSH, params, requestId);
+                        if (result == TextToSpeech.ERROR) {
+                            notifyHubTtsEvent(requestId, "error", "TTS_SPEAK_FAILED");
+                        }
+                    } catch (Exception e) {
+                        notifyHubTtsEvent(requestId, "error", "TTS_EXCEPTION");
+                    }
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void stop() {
+            handler.post(new Runnable() {
+                @Override
+                public void run() {
+                    if (tts != null) {
+                        try {
+                            tts.stop();
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }
+            });
+        }
     }
 
     private void handleMainFrameError() {
@@ -237,6 +407,14 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         handler.removeCallbacks(retryRunnable);
+        if (tts != null) {
+            try {
+                tts.stop();
+                tts.shutdown();
+            } catch (Exception ignored) {
+            }
+            tts = null;
+        }
         super.onDestroy();
     }
 
